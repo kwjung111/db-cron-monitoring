@@ -1,0 +1,10 @@
+go 1.21.3
+
+use (
+.
+./connectionPool
+./queries
+./jobs
+./sendMessage
+./util
+)
