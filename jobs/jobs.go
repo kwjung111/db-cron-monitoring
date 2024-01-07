@@ -4,6 +4,7 @@ import (
 	"connectionPool"
 	"log"
 	"sendMessage"
+	"time"
 	"util"
 
 	"github.com/go-co-op/gocron/v2"
@@ -14,26 +15,31 @@ var defaultToken string
 var jobLists = []*job{}
 
 type job struct {
-	name         string
-	description  string
-	query        string
-	messages     []string
-	columns      []string
-	cron         string
-	head         string
-	filter       jobFilter
-	recentStatus bool
-	token        string
+	name          string
+	description   string
+	query         string
+	messages      []string
+	columns       []string
+	cron          string
+	head          string
+	filter        jobFilter
+	textReplacer  jobTextReplacer
+	recentStatus  string
+	recentSuccess string
+	token         string
 }
 
 type Job interface {
 	Register(s gocron.Scheduler)
 	Execute()
+	makeBody([]map[string]string) (string, bool, error)
 	GetDescription() string
 	GetName() string
 	GetCron() string
-	GetRecentStatus() bool
-	SetRecentStatus(bool)
+	GetRecentStatus() string
+	GetRecentSuccess() string
+	SetRecentStatus(string)
+	SetRecentSuccess(string)
 }
 
 type jobBuilder struct {
@@ -48,11 +54,14 @@ type JobBuilder interface {
 	SetMessages([]string) JobBuilder
 	SetCron(string) JobBuilder
 	SetFilter(jobFilter) JobBuilder
+	SetTextReplacer(jobTextReplacer) JobBuilder
 	SetDescription(string) JobBuilder
 	Build() *job
 }
 
-type jobFilter func(map[string]string) bool
+type jobFilter func(map[string]string) (bool, error)
+
+type jobTextReplacer func(map[string]string) (map[string]string, error)
 
 // returns builder
 func MakeJob() JobBuilder {
@@ -110,6 +119,11 @@ func (jb *jobBuilder) SetFilter(filter jobFilter) JobBuilder {
 	return jb
 }
 
+func (jb *jobBuilder) SetTextReplacer(replacer jobTextReplacer) JobBuilder {
+	jb.job.textReplacer = replacer
+	return jb
+}
+
 // setter (optional) : description
 // 해당 job 에 대한 간략한 설명
 func (jb *jobBuilder) SetDescription(description string) JobBuilder {
@@ -120,7 +134,11 @@ func (jb *jobBuilder) SetDescription(description string) JobBuilder {
 // returns builded job
 func (jb *jobBuilder) Build() *job {
 	//validation -> name,cron
-	jb.job.SetRecentStatus(true)
+	if jb.job.name == "" {
+		log.Println("job.name not defined")
+	}
+	jb.job.SetRecentStatus("PENDING")
+	jb.job.SetRecentSuccess("no record")
 	return &jb.job
 }
 
@@ -139,28 +157,37 @@ func (j *job) Execute() {
 	rowMapList, err := util.GetResultfromDB(connectionPool.GetConnection(), j.query)
 	if err != nil {
 		log.Println("error : ", j.name, err)
-		j.SetRecentStatus(false)
+		j.SetRecentStatus("FAILED")
 		return
 	}
 
+	//메시지 생성 및 필터링
 	head := j.head
-	body, pass := makeBody(rowMapList, j.messages, j.columns, j.filter)
-	if !pass {
+	body, pass, err := j.makeBody(rowMapList)
+	if err != nil {
+		log.Println(j.name, " : ", err)
+		j.SetRecentStatus("FAILED")
 		return
 	}
+	if pass {
+		token := j.token
 
-	token := j.token
+		//Line API Token
+		if token == "" {
+			token = defaultToken
+		}
 
-	//Line API Token
-	if token == "" {
-		token = defaultToken
+		err = sendMessage.SendLineMessage(head+body, token)
+		if err != nil {
+			log.Println("error while sending Msg : ", err)
+		}
 	}
 
-	err = sendMessage.SendLineMessage(head+body, token)
-	if err != nil {
-		log.Println("error while sending Msg : ", err)
-	}
-	j.SetRecentStatus(true)
+	now := time.Now()
+	formattedTime := now.Format("2006-01-02 15:04:05")
+
+	j.SetRecentStatus("SUCCEED")
+	j.SetRecentSuccess(formattedTime)
 }
 
 // returns job.description
@@ -182,13 +209,23 @@ func (j *job) GetCron() string {
 }
 
 // returns job.recentStauts
-func (j *job) GetRecentStatus() bool {
+func (j *job) GetRecentStatus() string {
 	return j.recentStatus
 }
 
+// returns job.recentSucces
+func (j *job) GetRecentSuccess() string {
+	return j.recentSuccess
+}
+
 // set job.RenetStatus
-func (j *job) SetRecentStatus(status bool) {
+func (j *job) SetRecentStatus(status string) {
 	j.recentStatus = status
+}
+
+// set job.RenetStatus
+func (j *job) SetRecentSuccess(time string) {
+	j.recentSuccess = time
 }
 
 // push job to job list
@@ -197,7 +234,8 @@ func PushJob(j *job) {
 }
 
 // message, key 순으로 메세지 몸체를 파싱
-func makeBody(rowMapList []map[string]string, messages []string, keys []string, filter jobFilter) (string, bool) {
+// filter, textReplacer 로 커스텀 가능
+func (j *job) makeBody(rowMapList []map[string]string) (string, bool, error) {
 
 	var body string
 
@@ -207,25 +245,35 @@ func makeBody(rowMapList []map[string]string, messages []string, keys []string, 
 
 		var line string
 
-		if filter != nil {
-			if !filter(rowMap) {
+		if j.filter != nil {
+			if passed, err := j.filter(rowMap); err != nil {
+				return "", false, err
+			} else if !passed {
 				filteredRows++
 			}
 		}
 
-		for i, message := range messages {
+		var replaceErr error
+		if j.textReplacer != nil {
+			rowMap, replaceErr = j.textReplacer(rowMap)
+			if replaceErr != nil {
+				return "", false, replaceErr
+			}
+		}
+
+		for i, message := range j.messages {
 			line += message
-			if rowMap[keys[i]] != "" {
-				line += rowMap[keys[i]] + " "
+			if rowMap[j.columns[i]] != "" {
+				line += rowMap[j.columns[i]] + " "
 			}
 		}
 		body += line + "\n"
 	}
 
 	if filteredRows == len(rowMapList) {
-		return "", false
+		return "", false, nil
 	}
-	return body, true
+	return body, true, nil
 }
 
 // returns registered job List

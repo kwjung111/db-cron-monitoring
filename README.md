@@ -3,5 +3,4 @@
 
 # How to use
 1. config.yaml 파일을 작성하고, DSN(1줄) 과 LINE_TOKEN 항목을 작성
-2. queries/example.go 모듈을 참고해서 모듈 작성, main 의 initJobs() 함수에서 등록한다.
-
+2. queries/example.go 파일을 참고해서 job 파일 작성하고, 사용 시 main 의 initJobs() 함수에서 등록한다.

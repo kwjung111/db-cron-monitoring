@@ -81,11 +81,8 @@ func getAllStatus(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "===== job status list===== \n")
 
 	for _, job := range jobList {
-		status := "OK"
-		if !job.GetRecentStatus() {
-			status = "FAILED"
-		}
-		fmt.Fprintf(w, job.GetName()+" : "+status+"\n")
+
+		fmt.Fprintf(w, job.GetName()+" : "+job.GetRecentStatus()+" , recent Success : "+job.GetRecentSuccess()+"\n")
 	}
 
 	fmt.Fprintf(w, "===== job status list End ===== \n")
